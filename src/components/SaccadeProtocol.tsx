@@ -15,6 +15,7 @@ const WORD_BANK = [
 // --- TYPES ---
 type Side = 'LEFT' | 'RIGHT';
 type GameState = 'IDLE' | 'FIXATION' | 'CUE' | 'TARGET' | 'FEEDBACK';
+type LayoutOrder = 'NORMAL' | 'FLIPPED'; // New type to handle visual scrambling
 
 interface Cipher {
   left: string;
@@ -121,6 +122,7 @@ const InfinitePosner = () => {
     const [feedback, setFeedback] = useState<'HIT' | 'MISS' | null>(null);
     const [targetVisible, setTargetVisible] = useState(false);
     const [cipher, setCipher] = useState<Cipher>({ left: 'ZID', right: 'DAX' });
+    const [cipherLayout, setCipherLayout] = useState<LayoutOrder>('NORMAL'); // Controls visuals
     const [glitchAnim, setGlitchAnim] = useState(false);
     
     // --- ENGINE STATE (Source of Truth) ---
@@ -132,7 +134,7 @@ const InfinitePosner = () => {
         streak: 0,
         trialsSinceShift: 0,
         currentCipher: { left: 'ZID', right: 'DAX' },
-        currentTargetSide: 'LEFT' as Side, // <--- ADDED: This fixes the keyboard bug
+        currentTargetSide: 'LEFT' as Side,
         timer: null as ReturnType<typeof setTimeout> | null,
     });
 
@@ -151,8 +153,13 @@ const InfinitePosner = () => {
         const l = getRandomWord();
         const r = getRandomWord(l);
         const newCipher = { left: l, right: r };
+        
+        // Randomly decide visual order
+        const newLayout = Math.random() > 0.5 ? 'NORMAL' : 'FLIPPED';
+
         gameRef.current.currentCipher = newCipher;
         setCipher(newCipher);
+        setCipherLayout(newLayout); // Update layout state
         setGlitchAnim(true);
         playTone('GLITCH');
         setTimeout(() => setGlitchAnim(false), 500);
@@ -175,10 +182,7 @@ const InfinitePosner = () => {
         gameRef.current.timer = setTimeout(() => {
             if (!gameRef.current.isPlaying) return;
 
-            // Generate Logic
             const logic = generateRFTFrame(gameRef.current.level, gameRef.current.currentCipher);
-            
-            // KEY FIX: Update the REF with the correct side, not just the state
             gameRef.current.currentTargetSide = logic.correctSide; 
             
             setCue(logic);
@@ -187,7 +191,6 @@ const InfinitePosner = () => {
 
             gameRef.current.timer = setTimeout(() => {
                 if (!gameRef.current.isPlaying) return;
-                
                 setGamePhase('TARGET');
                 setTargetVisible(true);
                 setTimeout(() => setTargetVisible(false), 150);
@@ -269,8 +272,6 @@ const InfinitePosner = () => {
 
         if (gameRef.current.timer) clearTimeout(gameRef.current.timer);
         gameRef.current.currentState = 'FEEDBACK'; 
-
-        // KEY FIX: Compare against Ref, not State
         const correctSide = gameRef.current.currentTargetSide;
 
         let result: 'HIT' | 'MISS' = 'MISS';
@@ -296,7 +297,6 @@ const InfinitePosner = () => {
         setGamePhase('IDLE');
     };
 
-    // Keyboard Handler
     useEffect(() => {
         const handleKeyDown = (e: KeyboardEvent) => {
             if (!gameRef.current.isPlaying) return;
@@ -307,6 +307,15 @@ const InfinitePosner = () => {
         window.addEventListener('keydown', handleKeyDown);
         return () => window.removeEventListener('keydown', handleKeyDown);
     }, []); 
+
+    // --- RENDER HELPERS ---
+    const renderCipherItem = (word: string, side: 'LEFT' | 'RIGHT') => (
+        <div className="flex items-center gap-3">
+            <span className="text-fuchsia-400 font-bold text-xl font-mono">{word}</span>
+            <span className="text-slate-500 text-xs">IS</span>
+            <span className="text-white font-bold text-sm">{side}</span>
+        </div>
+    );
 
     // --- RENDER ---
     if (phase === 'IDLE') {
@@ -356,7 +365,7 @@ const InfinitePosner = () => {
     return (
         <div className="w-full h-screen bg-slate-950 overflow-hidden relative flex flex-col select-none cursor-crosshair">
             
-            {/* TOP BAR: STATS */}
+            {/* TOP BAR */}
             <div className="w-full p-4 flex justify-between items-start font-mono text-xs z-50 border-b border-slate-900 bg-slate-950/50">
                 <div className="flex gap-6">
                     <div>
@@ -385,23 +394,27 @@ const InfinitePosner = () => {
                 </div>
             </div>
 
-            {/* THE LIVING CIPHER - ALWAYS VISIBLE */}
+            {/* THE LIVING CIPHER - SCRAMBLED LAYOUT */}
             <div className={`w-full flex justify-center py-4 transition-all duration-300 ${glitchAnim ? 'opacity-50 blur-sm scale-105' : 'opacity-100'}`}>
                 <div className={`
                     flex gap-8 px-8 py-3 rounded-full border border-slate-800 bg-slate-900/80 backdrop-blur-md shadow-xl
                     ${glitchAnim ? 'border-fuchsia-500/50 bg-fuchsia-900/20' : ''}
                 `}>
-                    <div className="flex items-center gap-3">
-                        <span className="text-fuchsia-400 font-bold text-xl font-mono">{cipher.left}</span>
-                        <span className="text-slate-500 text-xs">IS</span>
-                        <span className="text-white font-bold text-sm">LEFT</span>
-                    </div>
-                    <div className="w-px h-full bg-slate-800"></div>
-                    <div className="flex items-center gap-3">
-                        <span className="text-fuchsia-400 font-bold text-xl font-mono">{cipher.right}</span>
-                        <span className="text-slate-500 text-xs">IS</span>
-                        <span className="text-white font-bold text-sm">RIGHT</span>
-                    </div>
+                    {cipherLayout === 'NORMAL' ? (
+                        <>
+                            {renderCipherItem(cipher.left, 'LEFT')}
+                            <div className="w-px h-full bg-slate-800"></div>
+                            {renderCipherItem(cipher.right, 'RIGHT')}
+                        </>
+                    ) : (
+                        <>
+                             {/* VISUALLY FLIPPED - Right item on left side */}
+                            {renderCipherItem(cipher.right, 'RIGHT')}
+                            <div className="w-px h-full bg-slate-800"></div>
+                            {renderCipherItem(cipher.left, 'LEFT')}
+                        </>
+                    )}
+                    
                     <div className="absolute -right-6 top-1/2 -translate-y-1/2">
                         {glitchAnim && <RefreshCw className="w-4 h-4 text-fuchsia-500 animate-spin" />}
                     </div>
@@ -410,8 +423,7 @@ const InfinitePosner = () => {
 
             {/* FIELD */}
             <div className="flex-1 flex items-center justify-between px-4 md:px-20 relative max-w-6xl mx-auto w-full">
-                
-                {/* LEFT RECEPTOR */}
+                {/* LEFT */}
                 <div 
                     onMouseDown={() => handleInput('LEFT')}
                     className={`
@@ -425,13 +437,10 @@ const InfinitePosner = () => {
                     <div className="w-1 h-1 bg-slate-600 rounded-full" />
                 </div>
 
-                {/* CENTER STAGE */}
+                {/* CENTER */}
                 <div className="flex flex-col items-center justify-center w-80 h-80 relative">
+                    {phase === 'FIXATION' && <Target className="w-6 h-6 text-slate-600 animate-pulse" />}
                     
-                    {phase === 'FIXATION' && (
-                        <Target className="w-6 h-6 text-slate-600 animate-pulse" />
-                    )}
-
                     {phase === 'CUE' && (
                         <div className="animate-in zoom-in duration-100 flex flex-col items-center">
                             <span className="text-[10px] text-slate-600 font-mono tracking-[0.3em] uppercase mb-4">DECODE</span>
@@ -447,20 +456,14 @@ const InfinitePosner = () => {
                         </div>
                     )}
 
-                    {/* Timer Bar */}
                     {phase === 'CUE' && (
                         <div className="absolute bottom-10 w-full h-1 bg-slate-900 rounded-full overflow-hidden">
-                            <div 
-                                className="h-full bg-cyan-500/50"
-                                style={{ 
-                                    animation: `shrink ${profile.speedWindow}ms linear forwards` 
-                                }}
-                            />
+                            <div className="h-full bg-cyan-500/50" style={{ animation: `shrink ${profile.speedWindow}ms linear forwards` }}/>
                         </div>
                     )}
                 </div>
 
-                {/* RIGHT RECEPTOR */}
+                {/* RIGHT */}
                 <div 
                     onMouseDown={() => handleInput('RIGHT')}
                     className={`
@@ -473,12 +476,9 @@ const InfinitePosner = () => {
                     {targetVisible && <div className="absolute inset-2 bg-white rounded animate-ping duration-75" />}
                     <div className="w-1 h-1 bg-slate-600 rounded-full" />
                 </div>
-
             </div>
             
-            <style>{`
-                @keyframes shrink { from { width: 100%; } to { width: 0%; } }
-            `}</style>
+            <style>{`@keyframes shrink { from { width: 100%; } to { width: 0%; } }`}</style>
         </div>
     );
 };
