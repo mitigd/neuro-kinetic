@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { StreamState, ColorState, ModifierType, GameResult } from '../types';
-import { Star, Circle, Zap, Play, Shuffle, AlertTriangle, Activity, Database, RefreshCw, Volume2, VolumeX, Shield, ShieldAlert, Keyboard, GitCommit } from 'lucide-react';
+import { Star, Circle, Play, Shuffle, AlertTriangle, Activity, Database, RefreshCw, Volume2, VolumeX, Shield, ShieldAlert, GitCommit, TrendingUp, Calendar, CheckCircle, XCircle } from 'lucide-react';
 
 /* -------------------------------------------------------------------------- */
-/* AUDIO ENGINE                                 */
+/* AUDIO ENGINE                                                               */
 /* -------------------------------------------------------------------------- */
 
 const playTone = (type: 'SUCCESS' | 'ERROR' | 'TICK' | 'REBOOT' | 'SHIELD_BREAK' | 'LIFE_UP') => {
@@ -33,8 +32,12 @@ const playTone = (type: 'SUCCESS' | 'ERROR' | 'TICK' | 'REBOOT' | 'SHIELD_BREAK'
 };
 
 /* -------------------------------------------------------------------------- */
-/* TYPES                                      */
+/* TYPES                                                                      */
 /* -------------------------------------------------------------------------- */
+
+enum StreamState { IDLE, READY, ACTIVE, SUMMARY }
+enum ColorState { RED = 'RED', BLUE = 'BLUE' }
+enum ModifierType { KEEP, INVERT }
 
 enum ComplexityLevel {
   BASELINE = 0,
@@ -45,18 +48,93 @@ enum ComplexityLevel {
   MAXIMUM_LOAD = 5
 }
 
+interface GameResult {
+  mode: string;
+  score: number;
+  accuracy: number;
+  maxComplexity: number;
+  date: number;
+}
+
+interface SessionLog {
+  id: string;
+  timestamp: number;
+  score: number;
+  maxComplexity: number;
+  accuracy: number;
+  totalAttempts: number;
+}
+
 interface StreamProtocolProps {
-  onGameOver: (result: GameResult) => void;
   onExit: () => void;
 }
 
 const STORAGE_KEY = 'neurokinetic_stream_data';
+const HISTORY_KEY = 'neurokinetic_stream_history';
+
+/* -------------------------------------------------------------------------- */
+/* ANALYTICS COMPONENT                                                        */
+/* -------------------------------------------------------------------------- */
+
+const AnalyticsChart: React.FC<{ history: SessionLog[] }> = ({ history }) => {
+  if (history.length < 2) return <div className="text-slate-500 text-xs text-center py-8">INSUFFICIENT DATA FOR TREND ANALYSIS</div>;
+
+  const recent = history.slice(-20); // Last 20 sessions
+  const height = 120;
+  const width = 100; // Percent
+  const maxScore = Math.max(...recent.map(s => s.score));
+  
+  // Create points for SVG
+  const points = recent.map((session, i) => {
+    const x = (i / (recent.length - 1)) * 100;
+    const y = 100 - ((session.accuracy / 100) * 100); // Inverse because SVG Y grows down
+    return `${x},${y}`;
+  }).join(' ');
+
+  const scorePoints = recent.map((session, i) => {
+    const x = (i / (recent.length - 1)) * 100;
+    const y = 100 - ((session.score / (maxScore || 1)) * 100);
+    return `${x},${y}`;
+  }).join(' ');
+
+  return (
+    <div className="w-full h-32 relative bg-slate-900/50 rounded-lg border border-slate-800 p-2 mt-4 overflow-hidden">
+      <div className="absolute top-2 left-2 text-[10px] text-slate-500 font-bold">PERFORMANCE DELTA</div>
+      <svg width="100%" height="100%" viewBox="0 0 100 100" preserveAspectRatio="none" className="overflow-visible">
+         {/* Grid Lines */}
+         <line x1="0" y1="25" x2="100" y2="25" stroke="#1e293b" strokeWidth="0.5" />
+         <line x1="0" y1="50" x2="100" y2="50" stroke="#1e293b" strokeWidth="0.5" />
+         <line x1="0" y1="75" x2="100" y2="75" stroke="#1e293b" strokeWidth="0.5" />
+         
+         {/* Accuracy Line */}
+         <polyline points={points} fill="none" stroke="#10b981" strokeWidth="2" vectorEffect="non-scaling-stroke" />
+         
+         {/* Score Line (Faint) */}
+         <polyline points={scorePoints} fill="none" stroke="#f59e0b" strokeWidth="1" strokeDasharray="4 2" vectorEffect="non-scaling-stroke" opacity="0.5" />
+      </svg>
+      <div className="flex justify-between text-[8px] text-slate-600 mt-1 uppercase">
+        <span>Oldest</span>
+        <span>Latest</span>
+      </div>
+      <div className="absolute bottom-1 right-2 flex gap-2 text-[8px]">
+          <span className="text-emerald-500">── Accuracy</span>
+          <span className="text-amber-500/50">-- Volume</span>
+      </div>
+    </div>
+  )
+}
+
+/* -------------------------------------------------------------------------- */
+/* MAIN COMPONENT                                                             */
+/* -------------------------------------------------------------------------- */
 
 const StreamProtocol: React.FC<StreamProtocolProps> = ({ onExit }) => {
   
   // -- STATE --
   const [gameState, setGameState] = useState<StreamState>(StreamState.IDLE);
   const [score, setScore] = useState(0);
+  const [sessionAttempts, setSessionAttempts] = useState(0); // Total clicks this session
+  const [sessionHits, setSessionHits] = useState(0); // Correct clicks this session
   const [lives, setLives] = useState(3);
   const [buffer, setBuffer] = useState(0); 
   const [isDamaged, setIsDamaged] = useState(false); 
@@ -66,10 +144,13 @@ const StreamProtocol: React.FC<StreamProtocolProps> = ({ onExit }) => {
   const [warmUpRounds, setWarmUpRounds] = useState(3);
   const [currentState, setCurrentState] = useState<ColorState>(ColorState.RED);
   const [nextModifier, setNextModifier] = useState<ModifierType>(ModifierType.KEEP);
+  
+  // Stats & Complexity
   const [complexity, setComplexity] = useState<ComplexityLevel>(() => {
       const saved = localStorage.getItem(STORAGE_KEY);
       return saved ? JSON.parse(saved).complexity : ComplexityLevel.BASELINE;
   });
+  
   const [history, setHistory] = useState<boolean[]>([]); 
   const [roundDuration, setRoundDuration] = useState(3000); 
   const [timeLeft, setTimeLeft] = useState(100); 
@@ -103,7 +184,7 @@ const StreamProtocol: React.FC<StreamProtocolProps> = ({ onExit }) => {
   }, [isMuted]);
 
   /* -------------------------------------------------------------------------- */
-  /* INPUT HANDLING                                 */
+  /* INPUT HANDLING                                                             */
   /* -------------------------------------------------------------------------- */
 
   useEffect(() => {
@@ -130,7 +211,7 @@ const StreamProtocol: React.FC<StreamProtocolProps> = ({ onExit }) => {
   }, [gameState, isInputInverted, isRebooting, currentState, nextModifier, isFluxActive]); 
 
   /* -------------------------------------------------------------------------- */
-  /* GAME LOGIC & LOOP                              */
+  /* GAME LOGIC & LOOP                                                          */
   /* -------------------------------------------------------------------------- */
 
   const handleStart = () => {
@@ -145,11 +226,32 @@ const StreamProtocol: React.FC<StreamProtocolProps> = ({ onExit }) => {
   };
 
   const startGame = () => {
-    setScore(0); setLives(3); setBuffer(0); setHistory([]); setWarmUpRounds(3); setRoundDuration(3000); 
+    setScore(0); setSessionAttempts(0); setSessionHits(0);
+    setLives(3); setBuffer(0); setHistory([]); setWarmUpRounds(3); setRoundDuration(3000); 
     setCurrentState(startColor); 
     setNextModifier(Math.random() > 0.5 ? ModifierType.KEEP : ModifierType.INVERT);
     setIsInputInverted(false); setIsFluxActive(false); setIsLureActive(false);
     setUserAnswer(null); setGameState(StreamState.ACTIVE);
+  };
+
+  const saveSession = () => {
+      const accuracy = sessionAttempts > 0 ? Math.round((sessionHits / sessionAttempts) * 100) : 0;
+      
+      const newLog: SessionLog = {
+          id: crypto.randomUUID(),
+          timestamp: Date.now(),
+          score: score,
+          maxComplexity: complexity,
+          accuracy: accuracy,
+          totalAttempts: sessionAttempts
+      };
+
+      const existingHistoryString = localStorage.getItem(HISTORY_KEY);
+      const existingHistory: SessionLog[] = existingHistoryString ? JSON.parse(existingHistoryString) : [];
+      const updatedHistory = [...existingHistory, newLog];
+      
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(updatedHistory));
+      setGameState(StreamState.SUMMARY);
   };
 
   const gameLoop = () => {
@@ -224,6 +326,7 @@ const StreamProtocol: React.FC<StreamProtocolProps> = ({ onExit }) => {
     if (gameState !== StreamState.ACTIVE || hasAnsweredRef.current || isRebooting) return;
     hasAnsweredRef.current = true;
     setUserAnswer(inputColor);
+    setSessionAttempts(prev => prev + 1);
 
     let effectiveModifier = nextModifier;
     if (isFluxActive) effectiveModifier = nextModifier === ModifierType.KEEP ? ModifierType.INVERT : ModifierType.KEEP;
@@ -235,6 +338,7 @@ const StreamProtocol: React.FC<StreamProtocolProps> = ({ onExit }) => {
 
     if (inputColor === expectedState) {
        triggerSound('SUCCESS');
+       setSessionHits(prev => prev + 1);
        updateDifficulty(true);
        setBuffer(prev => {
            const next = prev + 20; 
@@ -251,6 +355,7 @@ const StreamProtocol: React.FC<StreamProtocolProps> = ({ onExit }) => {
   };
 
   const handleMistake = () => {
+      setSessionAttempts(prev => prev + 1); // Timeout also counts as attempt
       if (lives === 1 && buffer >= 50) {
           triggerSound('SHIELD_BREAK');
           setIsShieldBreak(true); setBuffer(0); updateDifficulty(false);
@@ -286,38 +391,32 @@ const StreamProtocol: React.FC<StreamProtocolProps> = ({ onExit }) => {
   };
 
   /* -------------------------------------------------------------------------- */
-  /* UI COMPONENTS                                  */
+  /* UI COMPONENTS                                                            */
   /* -------------------------------------------------------------------------- */
 
-  // Fixed Neural Cabling Component (Visible)
   const NeuralCabling = () => (
     <div className="absolute inset-0 z-0 pointer-events-none">
        <svg width="100%" height="100%" className="transition-all duration-500 opacity-50">
-           {/* Left Input Wire (Starts left bottom 25%, goes to Left Button area approx 35%) */}
            <path 
              d={isInputInverted 
-                ? "M 25% 100% C 25% 60%, 75% 60%, 65% 50%"  // Crosses to Right Button
-                : "M 25% 100% C 25% 80%, 35% 80%, 35% 50%"} // Straight to Left Button
+                ? "M 25% 100% C 25% 60%, 75% 60%, 65% 50%"  
+                : "M 25% 100% C 25% 80%, 35% 80%, 35% 50%"} 
              stroke={isInputInverted ? "#f43f5e" : "#475569"} 
              strokeWidth="3" 
              fill="none" 
              strokeDasharray={isInputInverted ? "10,5" : "0"}
              className="transition-all duration-500 ease-in-out"
            />
-           
-           {/* Right Input Wire (Starts right bottom 75%, goes to Right Button area approx 65%) */}
            <path 
              d={isInputInverted 
-                ? "M 75% 100% C 75% 60%, 25% 60%, 35% 50%" // Crosses to Left Button
-                : "M 75% 100% C 75% 80%, 65% 80%, 65% 50%"} // Straight to Right Button
+                ? "M 75% 100% C 75% 60%, 25% 60%, 35% 50%" 
+                : "M 75% 100% C 75% 80%, 65% 80%, 65% 50%"} 
              stroke={isInputInverted ? "#06b6d4" : "#475569"} 
              strokeWidth="3" 
              fill="none" 
              strokeDasharray={isInputInverted ? "10,5" : "0"}
              className="transition-all duration-500 ease-in-out"
            />
-           
-           {/* Decor Nodes */}
            <circle cx="25%" cy="100%" r="6" className="fill-slate-600" />
            <circle cx="75%" cy="100%" r="6" className="fill-slate-600" />
        </svg>
@@ -325,19 +424,89 @@ const StreamProtocol: React.FC<StreamProtocolProps> = ({ onExit }) => {
   );
 
   /* -------------------------------------------------------------------------- */
-  /* RENDERING                                      */
+  /* RENDERING                                                                */
   /* -------------------------------------------------------------------------- */
 
+  // SUMMARY SCREEN
+  if (gameState === StreamState.SUMMARY) {
+      const storedHistory = localStorage.getItem(HISTORY_KEY);
+      const historyLog: SessionLog[] = storedHistory ? JSON.parse(storedHistory) : [];
+      
+      const lastSession = historyLog[historyLog.length - 1] || { accuracy: 0, score: 0 };
+      const weekLogs = historyLog.filter(h => h.timestamp > Date.now() - 7 * 24 * 60 * 60 * 1000);
+      const avgAccuracy = weekLogs.length > 0 
+          ? Math.round(weekLogs.reduce((a, b) => a + b.accuracy, 0) / weekLogs.length) 
+          : 0;
+
+      return (
+          <div className="w-full h-screen bg-slate-950 flex flex-col items-center justify-center font-mono p-6 overflow-y-auto">
+              <div className="max-w-md w-full animate-in zoom-in duration-300">
+                  <div className="text-center mb-8">
+                      <h2 className="text-2xl font-black text-white tracking-tighter mb-1">SESSION ANALYSIS</h2>
+                      <p className="text-xs text-slate-500 uppercase tracking-widest">Data committed to long-term storage</p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4 mb-6">
+                      <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
+                          <div className="text-slate-500 text-[10px] uppercase mb-1">Session Accuracy</div>
+                          <div className={`text-3xl font-black ${lastSession.accuracy > 80 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                              {lastSession.accuracy}%
+                          </div>
+                      </div>
+                      <div className="bg-slate-900 border border-slate-800 p-4 rounded-xl">
+                          <div className="text-slate-500 text-[10px] uppercase mb-1">Volume Processed</div>
+                          <div className="text-3xl font-black text-white">
+                              {lastSession.score}
+                          </div>
+                      </div>
+                  </div>
+
+                  <div className="bg-slate-900 border border-slate-800 p-6 rounded-xl mb-6">
+                      <div className="flex justify-between items-center mb-4">
+                          <h3 className="text-sm font-bold text-slate-300 flex items-center gap-2">
+                              <TrendingUp className="w-4 h-4 text-cyan-400" /> NEURO-KINETIC TREND
+                          </h3>
+                          <span className="text-[10px] text-slate-500 bg-slate-800 px-2 py-1 rounded">LAST 20 SESSIONS</span>
+                      </div>
+                      <div className="flex justify-between text-xs text-slate-400 mb-2">
+                          <span>7-Day Avg Accuracy: <span className="text-white font-bold">{avgAccuracy}%</span></span>
+                      </div>
+                      <AnalyticsChart history={historyLog} />
+                  </div>
+
+                  <button 
+                    onClick={() => setGameState(StreamState.IDLE)}
+                    className="w-full py-4 bg-slate-800 hover:bg-slate-700 text-white font-bold rounded-lg border border-slate-700 transition-all flex items-center justify-center gap-2"
+                  >
+                      RETURN TO MENU
+                  </button>
+              </div>
+          </div>
+      );
+  }
+
+  // INTRO SCREEN
   if (gameState === StreamState.IDLE) {
+      const storedHistory = localStorage.getItem(HISTORY_KEY);
+      const historyLog: SessionLog[] = storedHistory ? JSON.parse(storedHistory) : [];
+      const sessionsToday = historyLog.filter(h => new Date(h.timestamp).toDateString() === new Date().toDateString()).length;
+
       return (
           <div className="w-full h-screen flex flex-col items-center justify-center bg-slate-950 p-6 font-mono text-center overflow-y-auto relative z-10">
              <h2 className="text-3xl font-black text-white mb-6 tracking-tighter">STREAM PROTOCOL</h2>
              {complexity > 0 && (
-                 <div className="mb-8 flex items-center gap-2 px-4 py-2 bg-emerald-950/30 border border-emerald-500/30 rounded text-emerald-400 text-xs">
+                 <div className="mb-4 flex items-center gap-2 px-4 py-2 bg-emerald-950/30 border border-emerald-500/30 rounded text-emerald-400 text-xs">
                      <Database className="w-3 h-3" />
                      <span>RESUMING LOAD LEVEL: {complexity}</span>
                  </div>
              )}
+             
+             {/* Mini Stats on Intro */}
+             <div className="flex gap-4 mb-8 text-[10px] text-slate-500 uppercase tracking-widest">
+                <div className="flex items-center gap-2"><Calendar className="w-3 h-3" /> <span>Sessions Today: {sessionsToday}</span></div>
+                {historyLog.length > 0 && <div className="flex items-center gap-2"><TrendingUp className="w-3 h-3" /> <span>Total Data Points: {historyLog.length}</span></div>}
+             </div>
+
              <div className="max-w-xl text-slate-400 mb-6 space-y-4 text-sm">
                 <p>Maintain your <span className="text-white font-bold">Mental State</span> while rules shift.</p>
                 <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex justify-between items-center px-8">
@@ -359,19 +528,19 @@ const StreamProtocol: React.FC<StreamProtocolProps> = ({ onExit }) => {
                         </div>
                     </div>
                 </div>
-                <div className="bg-slate-900 p-4 rounded-lg border border-slate-800 text-left">
-                     <div className="flex justify-between items-start"><h4 className="text-cyan-400 font-bold mb-2 flex items-center gap-2"><Shield className="w-4 h-4" /> NEURAL BUFFER</h4></div>
-                     <p className="text-xs mb-2">Correct answers fill your <span className="text-cyan-400 font-bold">SYNAPTIC SHIELD</span>. If Shield {'>'} 50%, it absorbs a fatal mistake.</p>
-                </div>
              </div>
              <button onClick={handleStart} className="group flex items-center gap-3 px-8 py-4 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-lg transition-all hover:scale-105">
                 <Play className="fill-current" /> INITIATE
+             </button>
+             <button onClick={() => setGameState(StreamState.SUMMARY)} className="mt-4 text-slate-500 hover:text-cyan-400 text-xs flex items-center gap-2 transition-colors">
+                <TrendingUp className="w-3 h-3" /> ACCESS NEURAL LOGS
              </button>
              <button onClick={onExit} className="mt-8 text-slate-600 hover:text-slate-400 text-xs">DISCONNECT</button>
         </div>
       )
   }
 
+  // LOADING SCREEN
   if (gameState === StreamState.READY) {
     return (
         <div className="w-full h-screen bg-slate-950 flex flex-col items-center justify-center font-mono animate-in fade-in duration-300 select-none relative z-10">
@@ -465,12 +634,17 @@ const StreamProtocol: React.FC<StreamProtocolProps> = ({ onExit }) => {
               <div className="w-24 h-2 bg-slate-800 rounded-sm overflow-hidden"><div className="h-full bg-cyan-500 transition-all duration-300" style={{ width: `${buffer}%` }} /></div>
           </div>
           <div className="w-px h-4 bg-slate-800" />
-          <div className="flex items-center gap-2"><Zap className="w-4 h-4 text-amber-400" /><span>Load: {complexity}</span></div>
+          <div className="flex items-center gap-2"><GitCommit className="w-4 h-4 text-amber-400" /><span>Load: {complexity}</span></div>
         </div>
         <div className="flex items-center gap-4">
             <button onClick={() => setIsMuted(!isMuted)} className="hover:text-white transition-colors">{isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}</button>
             <span className="text-white">Chain: {score}</span>
-            <button onClick={onExit} className="hover:text-white transition-colors">Abort</button>
+            <button 
+                onClick={saveSession} 
+                className="px-3 py-1 bg-slate-800 hover:bg-rose-900/50 text-slate-400 hover:text-white rounded border border-slate-700 transition-all"
+            >
+                END SESSION
+            </button>
         </div>
       </div>
 
